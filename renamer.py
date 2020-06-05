@@ -145,9 +145,29 @@ class Renamer(Elaboratable):
 
         return m
 
+from nmigen.back.pysim import *
+
+def printState(renamer):
+    print("-- Cycle --")
+    for i in range(4):
+        outA = (yield renamer.outA[i])
+        outB = (yield renamer.outB[i])
+        outOut = (yield renamer.outOut[i])
+        update = yield renamer.updateEnabled[i]
+        print(f"\tadd {outOut}, {outA}, {outB} -- {update}")
 
 if __name__ == "__main__":
     renamer = Renamer(Impl(), Arch())
+
+    with Simulator(renamer) as sim:
+        def process():
+            for _ in range(10):
+                yield Tick()
+                yield from printState(renamer)
+        sim.add_clock(0.0001)
+        sim.add_process(process)
+        sim.run()
+
     ports = []
 
     for i in range(Impl().NumDecodes):
