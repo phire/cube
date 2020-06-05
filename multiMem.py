@@ -6,16 +6,16 @@ class MultiMem(Elaboratable):
         self.mem = [ [ Memory(width=width, depth=depth, name=f"mem_{i}_{j}") for i in range(writePorts)] for j in range(readPorts)]
 
         # read ports
-        self.read_addr = [ Signal(depth.bit_length(), name="read_addr" + str(i)) for i in range(readPorts)]
-        self.read_data = [ Signal(width.bit_length(), name="read_data" + str(i)) for i in range(readPorts)]
+        self.read_addr = [ Signal((depth-1).bit_length(), name="read_addr" + str(i)) for i in range(readPorts)]
+        self.read_data = [ Signal(width, name="read_data" + str(i)) for i in range(readPorts)]
 
         # write ports
-        self.write_addr = [ Signal(depth.bit_length(), name="write_addr" + str(i)) for i in range(writePorts)]
+        self.write_addr = [ Signal((depth-1).bit_length(), name="write_addr" + str(i)) for i in range(writePorts)]
         self.write_enable = [ Signal(name="write_en" + str(i)) for i in range(writePorts)]
-        self.write_data = [ Signal(width.bit_length(), name="write_data" + str(i)) for i in range(writePorts)]
+        self.write_data = [ Signal(width, name="write_data" + str(i)) for i in range(writePorts)]
 
         # we need a small bit of true multiport ram for the live value table
-        self.lvt = Memory(width=writePorts.bit_length(), depth=depth, name="lvt")
+        self.lvt = Memory(width=(writePorts - 1).bit_length(), depth=depth, name="lvt")
 
         self.readPorts = readPorts
         self.writePorts = writePorts
@@ -36,7 +36,7 @@ class MultiMem(Elaboratable):
 
         for i in range(self.readPorts):
             # Hold the output of the read mems until we select the right one.
-            read_data_buffer = Array(Signal(self.width.bit_length(), name=f"read_temp_{i}_{j}") for j in range(self.writePorts))
+            read_data_buffer = Array(Signal(self.width, name=f"read_temp_{i}_{j}") for j in range(self.writePorts))
 
             for j in range(self.writePorts):
                 name = "mem_" + str(i) + chr(ord('a') + j)
@@ -51,7 +51,7 @@ class MultiMem(Elaboratable):
                     write_port.en.eq(self.write_enable[j]),
 
                     # Set read port address
-                    read_port.addr.eq(self.read_data[i]),
+                    read_port.addr.eq(self.read_addr[i]),
 
                     # move read result into holding array
                     read_data_buffer[Const(j)].eq(read_port.data),
@@ -70,12 +70,12 @@ class MultiMem(Elaboratable):
 
 
 if __name__ == "__main__":
-    mm = MulitMem(32, 128, 3, 3)
+    mm = MultiMem(32, 4, 2, 2)
     ports = []
-    for i in range(3):
+    for i in range(2):
         ports += [mm.read_addr[i], mm.read_data[i]]
 
-    for i in range(3):
+    for i in range(2):
         ports += [mm.write_addr[i], mm.write_enable[i], mm.write_data[i]]
 
     main(mm, ports = ports)
