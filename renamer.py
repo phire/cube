@@ -48,8 +48,13 @@ class Renamer(Elaboratable):
         for i, decoder in enumerate(self.decoders):
             m.submodules[f"decoder{i}"] = decoder
 
-        allocatedCount = Const(0)
         # Allocate a renaming register for each uop which needs it
+        # TODO: Because we are planning to always keep our architectural regsisters in
+        #       the renaming register file, this allocator is wildly deficient once
+        #       we start retiring instructions.
+        #       I think we need an implementation that allocates register out of a
+        #       list (fifo?) of free registers.
+        allocatedCount = Const(0)
         for i, decoder in enumerate(self.decoders):
             oldAllocatedCount = allocatedCount
             allocatedCount = Signal(self.width, name=f"decoder_{i}_allocate_counter")
@@ -127,13 +132,14 @@ class Renamer(Elaboratable):
             # This works in reverse to conflicts. the last uop can't be suppressed by anything
             for archRegId, decoderId in suppressables:
                 enabled = Signal(name=f"is_{i}_enabled{decoderId}")
-                m.d.comb += enabled.eq((~self.isAllocated[decoderId] | decoder.regOut != archRegId) & enableChain)
+                m.d.comb += enabled.eq((~self.isAllocated[decoderId] | (decoder.regOut != archRegId)) & enableChain)
                 enableChain = enabled
 
             m.d.comb += self.updateEnabled[i].eq(enableChain)
             suppressables += [(decoder.regOut, i)]
 
         # Update RAT with all write arch registers
+        # TODO: need an unwinding mode which updates the RAT back to the required state
         for i, decoder in enumerate(self.decoders):
             m.d.comb += [
                 self.gprRAT.write_addr[i].eq(decoder.regOut),
@@ -142,6 +148,7 @@ class Renamer(Elaboratable):
             ]
 
         # TODO: Write some kind of data structure to allow rewinding
+        #       Prehaps a list of
 
         return m
 
