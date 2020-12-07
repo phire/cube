@@ -22,6 +22,8 @@ class Renamer(Elaboratable):
         self.width = width = Impl.numRenamingRegisters.bit_length()
 
         self.decoders = [ Decoder() for _ in range(Impl.NumDecodes)]
+
+        # The RAT holds the id for the renaming register which holds current value of each archtecture register
         self.gprRAT = MultiMem(
             width=width,
             depth=Arch.NumGPR,
@@ -38,6 +40,8 @@ class Renamer(Elaboratable):
         self.outA = [Signal(width, name=f"outA_{i}") for i in range(Impl.NumDecodes)]
         self.outB = [Signal(width, name=f"outB_{i}") for i in range(Impl.NumDecodes)]
         self.outOut = [Signal(width, name=f"outOut_{i}") for i in range(Impl.NumDecodes)]
+        self.outConflict = [Signal(name=f"outConflict_{i}") for i in range(Impl.NumDecodes)]
+        self.outValid = [Signal(name=f"outValid_{i}") for i in range(Impl.NumDecodes)]
 
 
     def elaborate(self, platform):
@@ -116,7 +120,9 @@ class Renamer(Elaboratable):
             m.d.sync += [
                 self.outA[i].eq(regA_final),
                 self.outB[i].eq(regB_final),
-                self.outOut[i].eq(self.allocated[i])
+                self.outOut[i].eq(self.allocated[i]),
+                # All uops must write to a renaming reg to be valid
+                self.outValid[i].eq(decoder.valid[2])
             ]
 
             # Each decoder down the chain needs to check for more and more conflicts
@@ -137,6 +143,9 @@ class Renamer(Elaboratable):
 
             m.d.comb += self.updateEnabled[i].eq(enableChain)
             suppressables += [(decoder.regOut, i)]
+
+            # We also need to pass this onto the scheduler
+            m.d.sync += self.outConflict[i].eq(~enableChain)
 
         # Update RAT with all write arch registers
         # TODO: need an unwinding mode which updates the RAT back to the required state
