@@ -40,7 +40,6 @@ class Renamer(Elaboratable):
         self.outA = [Signal(width, name=f"outA_{i}") for i in range(Impl.NumDecodes)]
         self.outB = [Signal(width, name=f"outB_{i}") for i in range(Impl.NumDecodes)]
         self.outOut = [Signal(width, name=f"outOut_{i}") for i in range(Impl.NumDecodes)]
-        self.outConflict = [Signal(name=f"outConflict_{i}") for i in range(Impl.NumDecodes)]
         self.outValid = [Signal(name=f"outValid_{i}") for i in range(Impl.NumDecodes)]
 
 
@@ -143,9 +142,6 @@ class Renamer(Elaboratable):
 
             m.d.comb += self.updateEnabled[i].eq(enableChain)
             suppressables += [(decoder.regOut, i)]
-
-            # We also need to pass this onto the scheduler
-            m.d.sync += self.outConflict[i].eq(~enableChain)
 
         # Update RAT with all write arch registers
         # TODO: need an unwinding mode which updates the RAT back to the required state

@@ -7,12 +7,19 @@ class Scheduler(Elaboratable):
     # Takes the output from renamer, stores it in a queue until all dependencies are met
     # and then issues it to the execution units
 
+    # TODO: The current implementation uses the renamingID diredtly as the queueID
+    #       This is simple, but wastes a bunch of space in scheduler/rob structures for the renaming
+    #       registers backing arch registers of completed instructions
+
     def __init__(self, Impl, Arch, renamer: Renamer):
         self.width = width = Impl.numRenamingRegisters.bit_length()
+        self.NumIssues = Impl.NumIssues
 
         # Inputs from renamer
 
         self.renamer = renamer
+
+
 
         # self.inA = [Signal(width, name=f"inA_{i}") for i in range(Impl.NumDecodes)]
         # self.inB = [Signal(width, name=f"inB_{i}") for i in range(Impl.NumDecodes)]
@@ -75,19 +82,87 @@ class Scheduler(Elaboratable):
         m.submodules.MappingTableStatus = self.MappingTableStatus
         # m.submodules.renamer = self.renamer
 
+        # First, we need to find conflicts between writes to MT
+
+        def accumulateConflcits(Result: Signal, ThisId: Signal, chain: Value, start: int, name):
+            # Look at every arg after this one in the wave and check if any depend on the same ID
+            final = chain
+            for j in range(start + 1, self.NumIssues):
+                conflictA = Signal(name=f"{name}_conflicted_by_{j}A")
+                conflictB = Signal(name=f"{name}_conflicted_by_{j}B")
+
+                accumulated = Signal()
+
+                m.d.comb += [
+                    # check if the IDs are equal
+                    conflictA.eq(ThisId == self.renamer.outA[j]),
+                    conflictB.eq(ThisId == self.renamer.outB[j]),
+
+                    # and acclumuate the result in a chain
+                    accumulated.eq(final | conflictA | conflictB)
+                ]
+
+                final = accumulated
+            m.d.comb += Result.eq(~final) # invert
+
+        def sumPrecedingConflicts(Result: Signal, ThisId: Signal, end: int, name):
+            # look at all args before this one and count how many conflcit
+            # Clamp at two
+
+            # I'm hoping this can be packed into one or two LUTs
+            finalSum = Const(0)
+            for j in range(0, end):
+                conflictA = Signal(name=f"{name}_conflicted_by_{j}A")
+                conflictB = Signal(name=f"{name}_conflicted_by_{j}B")
+                conflict = Signal(name=f"{name}_conflicted_by_{j}")
+
+                m.d.comb += [
+                    conflictA.eq(ThisId == self.renamer.outA[j]),
+                    conflictB.eq(ThisId == self.renamer.outB[j]),
+                    conflict.eq(conflictA | conflictB)
+                ]
+
+                sum = Signal(4) # just assume NumIssues will never exceed 15
+                m.d.comb += sum.eq(finalSum + conflict)
+                finalSum = sum
+
+            with m.If(finalSum > Const(2)):
+                m.d.comb += Result.eq(Const(2))
+            with m.Else():
+                m.d.comb += Result.eq(finalSum)
+
+        # These signals allow the status of a new MT entry to be set to 0 on create.
+        # If another uop in this same wave depends on it, the status will need to be set to something else
+        AllowStatusCreate = [Signal(name = f"allow_status_create_{i}") for i in range(self.NumIssues)]
+        for i in range(self.NumIssues):
+            accumulateConflcits(AllowStatusCreate[i], self.renamer.outOut[i], Const(0), i, f"uop{i}_create")
+
+        # For each arg, track if this is the first, second or Nth use of that dependenciy this wave
+        # Later uses might need to skip straght to another stage of depending
+        DependConflictOffset = [Signal(2, name = f"deopend_conflict_offset_{i}", reset=1) for i in range(self.NumIssues * 2)]
+
+        # And track if this is the last update
+        AllowStatusUpdate = [Signal(name = f"allow_status_update_{i}") for i in range(self.NumIssues * 2)]
+
+        for i in range(self.NumIssues):
+            accumulateConflcits(AllowStatusUpdate[i*2    ], self.renamer.outA[i], Const(0), i, f"uop{i}_argA_update")
+            accumulateConflcits(AllowStatusUpdate[i*2 + 1], self.renamer.outB[i], Const(0), i, f"uop{i}_argB_update")
+
+            sumPrecedingConflicts(DependConflictOffset[i*2    ], self.renamer.outA[i], i, f"uop{i}_argA_update")
+            sumPrecedingConflicts(DependConflictOffset[i*2 + 1], self.renamer.outB[i], i, f"uop{i}_argB_update")
 
         wPORT = 0
         c_wPORT = 0
         rPORT = 0
 
         # for each uop, create a entry in MT
-        for i in range(len(self.renamer.outValid)):
+        for i in range(self.NumIssues):
             m.d.comb += [
                 self.MappingTableStatus.write_addr[wPORT].eq(self.renamer.outOut[i]),
                 self.MappingTableStatus.write_data[wPORT].eq(Const(0)), # clear to no dependices
 
                  # but only if there isn't a conflict (another uop is reading this result this cycle)
-                self.MappingTableStatus.write_enable[wPORT].eq(~self.renamer.outConflict[i])
+                self.MappingTableStatus.write_enable[wPORT].eq(AllowStatusCreate[i])
             ]
 
             # Update used memory ports
@@ -101,30 +176,44 @@ class Scheduler(Elaboratable):
             # for each arg
             for j, arg in enumerate([self.renamer.outA[i], self.renamer.outB[i]]):
                 nnn = "AB"[j]
-                PrevStatus = Signal(2, name=f"uop{i}_{nnn}_status")
+                PrevStatus = Signal(3, name=f"uop{i}_{nnn}_status")
+
+                WriteCptr = Signal(name=f"uop{i}_{nnn}_write_cptr")
+                WriteMptr = Signal(name=f"uop{i}_{nnn}_write_mptr")
+                WriteStatus = Signal(name=f"uop{i}_{nnn}_write_status")
+
+                # Suppress all writes if this is the first arg and both args are equal
+                if j == 0:
+                    m.d.comb += [
+                        WriteCptr.eq((PrevStatus == Const(0)) & ArgsNotEqual),
+                        WriteMptr.eq((PrevStatus == Const(1)) & ArgsNotEqual),
+                        WriteStatus.eq(AllowStatusUpdate[i*2] & ArgsNotEqual)
+                    ]
+                else:
+                    m.d.comb += [
+                        WriteCptr.eq(PrevStatus == Const(0)),
+                        WriteMptr.eq(PrevStatus == Const(1)),
+                        WriteStatus.eq(AllowStatusUpdate[i*2 + 1])
+                    ]
 
                 m.d.comb += [
                     # Read the pervious status
                     self.MappingTableStatus.read_addr[rPORT].eq(arg),
-                    PrevStatus.eq(self.MappingTableStatus.read_data[rPORT]),
+                    PrevStatus.eq(self.MappingTableStatus.read_data[rPORT] + DependConflictOffset[i*2+j]),
 
-                    # If it only no dependencies, write our C-Pointer
-                    self.MappingTableCptr.write_enable[c_wPORT].eq(PrevStatus == Const(0)),
+                    # If it has no dependencies, write our C-Pointer
+                    self.MappingTableCptr.write_enable[c_wPORT].eq(WriteCptr),
                     self.MappingTableCptr.write_addr[c_wPORT].eq(arg),
                     self.MappingTableCptr.write_data[c_wPORT].eq(self.renamer.outOut[i]),
 
-                    # TODO: If it has one dependencie, write a new M-Pointer
+                    # TODO: If it has one dependencies, write a new M-Pointer
 
-                    # Update the status: 0 -> 1, 1 -> 2, 2 -> 2
+                    # Update the status
+                    self.MappingTableStatus.write_enable[wPORT].eq(WriteStatus),
                     self.MappingTableStatus.write_addr[wPORT].eq(arg),
-                    self.MappingTableStatus.write_data[wPORT].eq(Const(0b101001).word_select(PrevStatus, 2))
+                    # 0 -> 1, 1 -> 2, 2 -> 2, 3 -> 2, 4 -> 2
+                    self.MappingTableStatus.write_data[wPORT].eq(Const(0b1010101001).word_select(PrevStatus, 2))
                 ]
-
-                # Suppress updates if this is the first arg and both args are equal
-                if j == 0:
-                    m.d.comb += self.MappingTableStatus.write_enable[wPORT].eq(ArgsNotEqual)
-                else:
-                    m.d.comb += self.MappingTableStatus.write_enable[wPORT].eq(Const(1))
 
                 # Update used memory ports
                 rPORT += 1
