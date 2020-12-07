@@ -2,7 +2,7 @@ from nmigen import *
 from nmigen.cli import main
 
 class MultiMem(Elaboratable):
-    def __init__(self, width, depth, readPorts, writePorts):
+    def __init__(self, width, depth, readPorts, writePorts, init=None):
 
         lvt_width = (writePorts - 1).bit_length()
 
@@ -19,7 +19,7 @@ class MultiMem(Elaboratable):
             # we need a small bit of true multiport ram for the live value table
             self.lvt = Memory(width=(writePorts - 1).bit_length(), depth=depth, name="lvt")
         else: # Otherwise, LUTmem
-            self.lutMem = Memory(width=width, depth=depth, name="mem")
+            self.lutMem = Memory(width=width, depth=depth, name="mem", init=init)
 
         # read ports
         self.read_addr = [ Signal((depth-1).bit_length(), name="read_addr" + str(i)) for i in range(readPorts)]
@@ -90,7 +90,7 @@ class MultiMem(Elaboratable):
                 ]
 
             for i in range(self.readPorts):
-                m.submodules["mem_" + chr(ord('a') + i) + "_read"] = rport = self.lutMem.read_port()
+                m.submodules["mem_" + chr(ord('a') + i) + "_read"] = rport = self.lutMem.read_port(domain="comb")
 
                 m.d.comb += [
                     rport.addr.eq(self.read_addr[i]),

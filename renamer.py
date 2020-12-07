@@ -34,7 +34,7 @@ class Renamer(Elaboratable):
         self.isAllocated = [Signal(name=f"isAllocated_{i}") for i in range(Impl.NumDecodes)]
         self.updateEnabled = [Signal(name=f"updateEnabled_{i}") for i in range(Impl.NumDecodes)]
 
-        self.nextFreeRegister = Signal(width, reset=0)
+        self.nextFreeRegister = Signal(width, reset=1) # keep zero as NULL
 
         # outputs
         self.outA = [Signal(width, name=f"outA_{i}") for i in range(Impl.NumDecodes)]
