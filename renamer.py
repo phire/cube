@@ -21,7 +21,7 @@ class Renamer(Elaboratable):
     def __init__(self, Impl, Arch):
         self.width = width = Impl.numRenamingRegisters.bit_length()
 
-        self.decoders = [ Decoder() for _ in range(Impl.NumDecodes)]
+        self.decoders = [ Decoder(i) for i in range(Impl.NumDecodes)]
 
         # The RAT holds the id for the renaming register which holds current value of each archtecture register
         self.gprRAT = MultiMem(

@@ -3,6 +3,7 @@ from nmigen.cli import main
 from decoder import Decoder
 from renamer import Renamer
 from scheduler import Scheduler
+from matrixScheduler import MatrixScheduler
 
 from nmigen_boards.de10_nano import *
 
@@ -23,7 +24,7 @@ class Pipeline(Elaboratable):
     def __init__(self, Impl, Arch):
 
         self.renamer = Renamer(Impl, Arch)
-        self.scheduler = Scheduler(Impl, Arch)
+        self.scheduler = MatrixScheduler(Impl, Arch)
 
 
     def elaborate(self, platform: DE10NanoPlatform):
@@ -49,13 +50,14 @@ class Pipeline(Elaboratable):
 
 
         m.d.comb += [
-            self.scheduler.readStatus.eq(switch_buffer),
+            self.scheduler.clear_addr.eq(switch_buffer),
             Cat(led[0], led[1], led[2], led[3], led[4], led[5], led[6], led[7]).eq(led_buffer)
         ]
 
         m.d.sync += [
             switch_buffer.eq(Cat(switch, switch_buffer[1:4])), # just shift an address in
-            led_buffer.eq(Cat(self.scheduler.readyValid[0], self.scheduler.readyValid[1], self.scheduler.readyValid[2], self.scheduler.readyValid[3]))
+           # led_buffer.eq(Cat(self.scheduler.readyValid[0], self.scheduler.readyValid[1], self.scheduler.readyValid[2], self.scheduler.readyValid[3]))
+           led_buffer.eq(self.scheduler.ready[0])
         ]
 
         return m

@@ -31,8 +31,8 @@ class Scheduler(Elaboratable):
         self.MappingTableStatus = MultiMem(
             width=2, # 0 = No dependents, 1 = One dependent, 2 = Multiple dependents, 3 = completed
             depth=Impl.numRenamingRegisters,
-            readPorts=Impl.NumDecodes * 2 + Impl.NumIssues, # Each new uop needs to update the status of both it's arguments.
-                                                            # Each Issue needs know how many depedents
+            readPorts=Impl.NumDecodes * 2 + self.NumWakeupChecks, # Each new uop needs to update the status of both it's arguments.
+                                                            # Each wakeup check needs to check the status it's other arg
             writePorts=Impl.NumDecodes * 3 + Impl.NumIssues,  # Each new uop needs to set the new status of itself and both it's arguments
                                                               # Each issue needs to update the status to completed
             init=[3] * Impl.numRenamingRegisters)
@@ -70,6 +70,7 @@ class Scheduler(Elaboratable):
 
 
         self.wakeUpNext = [Signal(width, name=f"ready{i}") for i in range(self.NumWakeupChecks)]
+        self.wakeUpNextSrc = [Signal(width, name=f"ready{i}") for i in range(self.NumWakeupChecks)]
 
         #
         self.readStatus = Signal(Impl.numRenamingRegisters.bit_length())
@@ -286,7 +287,7 @@ class Scheduler(Elaboratable):
 
             # Identify the other argument which wasn't the source of the wakeup
             # Saves us a read port
-            with m.If(argA == wakeupId):
+            with m.If(argA == self.wakeUpNextSrc):
                 m.d.comb += otherArg.eq(argB)
             with m.Else():
                 m.d.comb += otherArg.eq(argA)
@@ -322,7 +323,8 @@ class Scheduler(Elaboratable):
                 self.MappingTableStatus.write_data[wPORT].eq(Const(3)),
 
                 # queue any dependcies for update
-                self.wakeUpNext[i].eq(nextCptr)
+                self.wakeUpNext[i].eq(nextCptr),
+                self.wakeUpNextSrc[i].eq(wakeupId)
             ]
 
             rPORT += 1

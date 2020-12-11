@@ -10,8 +10,8 @@ class MatrixRow(Elaboratable):
         self.id = row_id
         addr_width = (num_values-1).bit_length()
 
-        self.addr = Array(Array(Signal(addr_width, name=f"row_addr_{i}_{j}") for j in range(num_sets_per_row)) for i in range(num_sets))
-        self.row_set  = Array(Signal(name=f"row_set_{i}") for i in range(num_sets))
+        self.addr = [[Signal(addr_width, name=f"row_addr_{i}_{j}") for j in range(num_sets_per_row)] for i in range(num_sets)]
+        self.row_set  = [Signal(name=f"row_set_{i}") for i in range(num_sets)]
 
         self.clears = Signal(num_values, name=f"col_clear")
 
@@ -35,7 +35,7 @@ class MatrixRow(Elaboratable):
             for row_set, addrs in zip(self.row_set, self.addr):
                 for addr in addrs:
                     new_selected = Signal(name=f"row_{self.id}_col_{i}_selected")
-                    m.d.comb += new_selected.eq(selected | (row_set & (addr == Const(self.id))))
+                    m.d.comb += new_selected.eq(selected | (row_set & (addr == Const(i))))
                     selected = new_selected
 
             with m.If(col_clear): # A clear overrides sets
@@ -56,8 +56,8 @@ class Matrix(Elaboratable):
         addr_width = (size-1).bit_length()
 
         # set ports
-        self.row_addr = Array(Signal(addr_width, name=f"row_addr_{i}") for i in range(num_sets))
-        self.col_addr = Array(Array(Signal(addr_width, name=f"col_addr_{i}_{j}") for j in range(num_sets_per_row)) for i in range(num_sets))
+        self.row_addr = [Signal(addr_width, name=f"row_addr_{i}") for i in range(num_sets)]
+        self.col_addr = [[Signal(addr_width, name=f"col_addr_{i}_{j}") for j in range(num_sets_per_row)] for i in range(num_sets)]
 
         # clear ports
         self.clear_col_addr = Array(Signal(addr_width, name=f"clear_addr_{i}") for i in range(num_clears))
@@ -102,19 +102,35 @@ class Matrix(Elaboratable):
 
 class PiorityEncoder(Elaboratable):
     def __init__(self, size):
-        width = (size-1).bit_length()
+        self.width = width = (size-1).bit_length()
+        self.num_outs = 4
 
         self.input = Signal(size)
 
-        self.out = Signal(width)
+        self.out = Array(Signal(width, name=f"Selected_{i}") for i in range(self.num_outs))
 
     def elaborate(self, platform):
         m = Module()
 
+
+        for out in self.out:
+            m.d.comb += out.eq(0)
+
+        count_prev = Const(0)
         for i in range(len(self.input)):
-            if i >= 0:
-                with m.If(self.input[i] == True):
-                    m.d.comb += self.out.eq(i)
+            if i > 0:
+                for j in range(self.num_outs):
+                    count = Signal((self.num_outs + 1).bit_length())
+
+                    with m.If((self.input[i] == True) & (count_prev < self.num_outs)):
+                        m.d.comb += [
+                            self.out[count_prev].eq(i),
+                            count.eq(count_prev + 1)
+                        ]
+                    with m.Else():
+                        m.d.comb += count.eq(count_prev)
+
+                    count_prev = count
 
         return m
 
@@ -150,8 +166,8 @@ class MatrixScheduler(Elaboratable):
         #self.ready = [Signal(width, name=f"ready{i}") for i in range(self.NumWakeupChecks)]
         #self.readyValid = [Signal(name=f"ready{i}_valid") for i in range(self.NumWakeupChecks)]
 
-        self.ready = [Signal(width)]
-        self.readyValid = [Signal()]
+        self.ready = Array(Signal(width) for i in range(Impl.NumDecodes))
+        self.readyValid = Array(Signal(width) for i in range(Impl.NumDecodes))
 
 
 
@@ -180,11 +196,13 @@ class MatrixScheduler(Elaboratable):
         encoder = PiorityEncoder(self.matrix.size)
         m.submodules += encoder
 
-        m.d.comb += [
-            encoder.input.eq(self.matrix.is_clear),
-            self.ready[0].eq(encoder.out),
-            self.readyValid[0].eq(encoder.out != 0)
-        ]
+        m.d.comb += encoder.input.eq(self.matrix.is_clear),
+
+        for encoder_out, ready, readyValid in zip(encoder.out, self.ready, self.readyValid):
+            m.d.comb += [
+                ready.eq(encoder_out),
+                readyValid.eq(encoder_out != 0)
+            ]
 
         return m
 
