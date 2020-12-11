@@ -3,50 +3,19 @@ from nmigen.cli import main
 from multiMem import MultiMem
 from renamer import Renamer
 
-
-class Matrixvalue(Elaboratable):
-
-    def __init__(self, addr_width, num_sets, id):
-        self.num_sets = num_sets
-        self.id = id
-
-        self.value = Signal()
-        self.addr = Array(Signal(addr_width, name=f"addr_{id}_{i}") for i in range(num_sets))
-        self.row_set  = Array(Signal(name=f"row_set_{id}_{i}") for i in range(num_sets))
-        self.col_clear = Signal()
-
-    def elaborate(self, platform):
-        m = Module()
-
-        selected = Const(0)
-
-        for row_set, set_addr in zip(self.row_set, self.addr):
-            new_selected = Signal()
-            m.d.comb += new_selected.eq(selected | (row_set & (set_addr == Const(self.id))))
-            selected = new_selected
-
-
-        with m.If(self.col_clear): # A clear overridess sets
-            m.d.sync += self.value.eq(False)
-        with m.Elif(selected):
-            m.d.sync += self.value.eq(True)
-        with m.Else():
-            m.d.sync += self.value.eq(self.value)
-
-        return m
-
 class MatrixRow(Elaboratable):
-    def __init__(self, num_values, num_sets, row_id):
+    def __init__(self, num_values, num_sets, num_sets_per_row, row_id):
+        self.num_values = num_values
         self.num_sets = num_sets
         self.id = row_id
         addr_width = (num_values-1).bit_length()
 
-        self.addr = Array(Signal(addr_width) for _ in range(num_sets))
-        self.row_set  = Array(Signal() for _ in range(num_sets))
+        self.addr = Array(Array(Signal(addr_width, name=f"row_addr_{i}_{j}") for j in range(num_sets_per_row)) for i in range(num_sets))
+        self.row_set  = Array(Signal(name=f"row_set_{i}") for i in range(num_sets))
 
-        self.clears = Array(Signal() for _ in range(num_values))
+        self.clears = Signal(num_values, name=f"col_clear")
 
-        self.values = [Matrixvalue(addr_width, num_sets, i) for i in range(1, num_values) if id != row_id]
+        self.values = Signal(num_values, name=f"row_{row_id}_values")
 
         # outputs
         self.all_clear = Signal()
@@ -54,32 +23,30 @@ class MatrixRow(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        all_clear = Const(1)
+        for i in range(self.num_values):
+            if i == self.id or i == 0: # skip row == col and the zero column
+                continue
 
-        for value in self.values:
-            m.submodules += value
+            col_clear = Signal()
+            m.d.comb += col_clear.eq(self.clears[i])
 
-            # Hook up all set ports
-            for i in range(self.num_sets):
-                m.d.comb += [
-                    value.addr[i].eq(self.addr[i]),
-                    value.row_set[i].eq(self.row_set[i])
-                ]
+            selected = Const(0)
 
-            # Hook up the column clear signal
-            m.d.comb += value.col_clear.eq(self.clears[i])
+            for row_set, addrs in zip(self.row_set, self.addr):
+                for addr in addrs:
+                    new_selected = Signal(name=f"row_{self.id}_col_{i}_selected")
+                    m.d.comb += new_selected.eq(selected | (row_set & (addr == Const(self.id))))
+                    selected = new_selected
 
-            # determine if all values in the row are clear
-            # TODO: Maybe we should delay this by a cycle?
-            is_clear = Signal(name=f"value_{value.id}_is_clear")
-            all_clear_acc = Signal(name=f"value_{value.id}_accumulator")
-            m.d.comb += [
-                is_clear.eq(value.value == 0),
-                all_clear_acc.eq(is_clear & all_clear)
-            ]
-            all_clear = all_clear_acc
+            with m.If(col_clear): # A clear overrides sets
+                m.d.sync += self.values[i].eq(False)
+            with m.Elif(selected):
+                m.d.sync += self.values[i].eq(True)
+            with m.Else():
+                m.d.sync += self.values[i].eq(self.values[i])
 
-        m.d.comb += self.all_clear.eq(all_clear)
+
+        m.d.comb += self.all_clear.eq(self.values == 0)
         return m
 
 class Matrix(Elaboratable):
@@ -89,23 +56,21 @@ class Matrix(Elaboratable):
         addr_width = (size-1).bit_length()
 
         # set ports
-        self.row_addr = Array(Signal(addr_width) for _ in range(num_sets))
-        self.col_addr = Array(Array(Signal(addr_width) for _ in range(num_sets_per_row)) for _ in range(num_sets))
+        self.row_addr = Array(Signal(addr_width, name=f"row_addr_{i}") for i in range(num_sets))
+        self.col_addr = Array(Array(Signal(addr_width, name=f"col_addr_{i}_{j}") for j in range(num_sets_per_row)) for i in range(num_sets))
 
         # clear ports
-        self.clear_col_addr = Array(Signal(addr_width) for _ in range(num_clears))
+        self.clear_col_addr = Array(Signal(addr_width, name=f"clear_addr_{i}") for i in range(num_clears))
 
         # outputs
         self.is_clear = Signal(size)
 
-        self.rows = Array(MatrixRow(size, num_sets, i) for i in range(1, size))
+        self.rows = Array(MatrixRow(size, num_sets, num_sets_per_row, i) for i in range(1, size))
 
     def elaborate(self, platform):
         m = Module()
 
         m.submodules += self.rows
-
-
 
         # clear column address decoders
         for i in range(self.size):
@@ -126,7 +91,7 @@ class Matrix(Elaboratable):
             for j, (row_addr, col_addrs) in enumerate(zip(self.row_addr, self.col_addr)):
                 m.d.comb += row.row_set[j].eq(row_addr == row.id)
                 for k, col_addr in enumerate(col_addrs):
-                    m.d.comb += row.addr[j].eq(col_addr)
+                    m.d.comb += row.addr[j][k].eq(col_addr)
 
             m.d.comb += self.is_clear[row.id].eq(row.all_clear)
 
@@ -174,6 +139,8 @@ class MatrixScheduler(Elaboratable):
         self.inOut = [Signal(width, name=f"inOut_{i}") for i in range(Impl.NumDecodes)]
         self.inValid = [Signal(name=f"inValid_{i}") for i in range(Impl.NumDecodes)]
 
+        self.clear_addr = Signal(width)
+
         # wakeup matrix
         self.matrix = Matrix(Impl.numRenamingRegisters, Impl.NumDecodes, 2, Impl.NumIssues)
 
@@ -203,6 +170,10 @@ class MatrixScheduler(Elaboratable):
             with m.Else():
                 m.d.comb += self.matrix.row_addr[i].eq(0)
 
+        m.d.comb += self.matrix.clear_col_addr[0].eq(self.clear_addr)
+        m.d.comb += self.matrix.clear_col_addr[1].eq(self.clear_addr ^ 0b010101)
+        m.d.comb += self.matrix.clear_col_addr[2].eq(self.clear_addr + 5)
+        m.d.comb += self.matrix.clear_col_addr[3].eq(self.clear_addr + 16)
 
         # This only gets us one ready per cycle
         # # Which is not enough :P
@@ -222,7 +193,7 @@ if __name__ == "__main__":
     class Impl:
         NumDecodes = 4
         NumIssues = 4
-        numRenamingRegisters = 32
+        numRenamingRegisters = 64
 
     mm = MatrixScheduler(Impl(), None)
 
@@ -230,15 +201,5 @@ if __name__ == "__main__":
 
     for inOut, inA, inB, inValid in zip(mm.inOut, mm.inA, mm.inB, mm.inValid):
         ports += [inOut, inA, inB, inValid]
-
-    # for col_addrs in mm.col_addr:
-    #     for col_addr in col_addrs:
-    #         ports += [col_addr]
-
-    # for clear_col_addr in mm.clear_col_addr:
-    #     ports += [clear_col_addr]
-
-    # for is_clear in mm.is_clear:
-    #     ports += [is_clear]
 
     main(mm, ports = ports)
