@@ -1,4 +1,5 @@
 from nmigen import *
+from nmigen.lib.coding import *
 from nmigen.cli import main
 from multiMem import MultiMem
 from renamer import Renamer
@@ -123,7 +124,20 @@ class PiorityEncoder(Elaboratable):
     # Takes N inputs
     # Returns the encoded ID of the first M high input
 
+    # Future optimization ideas:
+    #  * For our usecase, we don't really need priority. Any M outputs will do
+    #    We can cut the depth in half by having two half-sized priority encoders
+    #    working independently in opposite directions. Some simple post-filtering
+    #    can remove duplicate results that arise when less than M inputs are hot.
+    #    We don't care about duplicates in this cycle, so  duplicate detection can
+    #    be done in a future pipeline stage if needed
+    #  * We might not care if the detection is lossy.
+    #    By splitting this into two banks, the carry chain can be cut in half
+    #    The downside is that if the two banks aren't balanced, half out outputs
+    #    might be incorrectly NULL
+
     def __init__(self, size, num_outs):
+        self.size = size
         self.width = width = (size-1).bit_length()
         self.num_outs = num_outs
 
@@ -134,26 +148,38 @@ class PiorityEncoder(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
+        negated = Signal(self.size)
+
+        # FPGAs have dedicated carry propagation chains in their adders which we can take
+        # advantage of to quickly find the first bit
+        m.d.comb += negated.eq(~self.input + 1)
+
+        prevInput = self.input
+        prevNegated = negated
+
         for out in self.out:
-            m.d.comb += out.eq(0)
+            outHot = Signal(self.size)
+            outRegisterd = Signal(self.size)
+            nextInput = Signal(self.size)
+            nextNegated = Signal(self.size)
 
-        # Maybe there is a smarter (or less perfect) way to do this
-        # But we just brute force it
-        count_prev = Const(0)
-        for i in range(len(self.input)):
-            if i > 0:
-                for j in range(self.num_outs):
-                    count = Signal((self.num_outs + 1).bit_length())
+            encoder = Encoder(self.size)
 
-                    with m.If((self.input[i] == True) & (count_prev < self.num_outs)):
-                        m.d.comb += [
-                            self.out[count_prev].eq(i),
-                            count.eq(count_prev + 1)
-                        ]
-                    with m.Else():
-                        m.d.comb += count.eq(count_prev)
+            m.submodules += encoder
 
-                    count_prev = count
+            # Copy the one-hot so the encoding doesn't mess with our timing measurements
+            m.d.sync += outRegisterd.eq(outHot)
+
+            m.d.comb += [
+                outHot.eq(prevNegated & prevInput),
+                nextNegated.eq(prevNegated >> 1),
+                nextInput.eq((nextNegated + outHot) >> 1),
+
+                # Keep the old api by still outputting encoded outputs
+                encoder.i.eq(outRegisterd),
+                out.eq(Mux(encoder.n, Const(0), encoder.o)),
+            ]
+            (prevInput, prevNegated) = (nextInput, nextNegated)
 
         return m
 
