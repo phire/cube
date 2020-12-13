@@ -23,7 +23,7 @@ class Renamer(Elaboratable):
 
         self.decoders = [ Decoder(i) for i in range(Impl.NumDecodes)]
 
-        # The RAT holds the id for the renaming register which holds current value of each archtecture register
+        # The RAT holds the id for the renaming register which holds current value of each architecture register
         self.gprRAT = MultiMem(
             width=width,
             depth=Arch.NumGPR,
@@ -52,7 +52,7 @@ class Renamer(Elaboratable):
             m.submodules[f"decoder{i}"] = decoder
 
         # Allocate a renaming register for each uop which needs it
-        # TODO: Because we are planning to always keep our architectural regsisters in
+        # TODO: Because we are planning to always keep our architectural registers in
         #       the renaming register file, this allocator is wildly deficient once
         #       we start retiring instructions.
         #       I think we need an implementation that allocates register out of a

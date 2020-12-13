@@ -2,7 +2,7 @@ from nmigen import *
 from nmigen.lib.coding import *
 from nmigen.cli import main
 from multiMem import MultiMem
-from renamer import Renamer
+from util import *
 
 class MatrixRow(Elaboratable):
     def __init__(self, num_values, num_sets, row_id):
@@ -10,17 +10,20 @@ class MatrixRow(Elaboratable):
         self.num_sets = num_sets
         self.id = row_id
 
+        # inputs
         self.row_selects  = [Signal(name=f"row_select_{i}") for i in range(num_sets)]
         self.row_sets = [Signal(num_values) for j in range(num_sets)]
 
         self.clears = Signal(num_values, name=f"col_clear")
 
-        self.values = Signal(num_values, name=f"row_{row_id}_values")
+        # State
+        self.values = Signal(num_values, name=f"row_{row_id}_values") # Value of each matrix cell
 
+        # Constants
         self.permanent_mask = Const(~(1 | 1 << row_id))
 
         # outputs
-        self.all_clear = Signal()
+        self.all_clear = Signal(name=f"row_{row_id}_all_clear")
 
     def elaborate(self, platform):
         m = Module()
@@ -63,8 +66,8 @@ class Matrix(Elaboratable):
         addr_width = (size-1).bit_length()
 
         # set ports
-        self.row_addr = [Signal(addr_width, name=f"row_addr_{i}") for i in range(num_sets)]
-        self.col_addr = [[Signal(addr_width, name=f"col_addr_{i}_{j}") for j in range(num_sets_per_row)] for i in range(num_sets)]
+        self.row_selects = [Signal(size, name=f"row_selects_{i}") for i in range(num_sets)]
+        self.row_data = [Signal(size, name=f"row_data_{i}") for i in range(num_sets)]
 
         # clear ports
         self.clear_col_addr = Array(Signal(addr_width, name=f"clear_addr_{i}") for i in range(num_clears))
@@ -72,12 +75,13 @@ class Matrix(Elaboratable):
         # outputs
         self.is_clear = Signal(size)
 
-        self.rows = Array(MatrixRow(size, num_sets, i) for i in range(1, size))
+        self.rows = [MatrixRow(size, num_sets, i) for i in range(1, size)]
 
     def elaborate(self, platform):
         m = Module()
 
-        m.submodules += self.rows
+        for i, row in enumerate(self.rows):
+            m.submodules[f"row_{row.id}"] = row
 
         col_clears = Array(Signal() for _ in range(self.size))
         m.d.comb += Cat(*col_clears).eq(0)
@@ -86,27 +90,14 @@ class Matrix(Elaboratable):
         for clear_port in self.clear_col_addr:
             col_clears[clear_port].eq(1)
 
-        # Precalculate row selects and
-        all_row_selects = [Array(Signal() for _ in range(self.size)) for i in range(self.num_sets)]
-        row_sets = [Array(Signal() for _ in range(self.size)) for i in range(self.num_sets)]
-
-        for i, (select, row_set) in enumerate(zip(all_row_selects, row_sets)):
-            m.d.comb += [
-                Cat(*select).eq(0), # clear
-                Cat(*row_set).eq(0),
-                select[self.row_addr[i]].eq(1),
-            ]
-
-            for col_addr in self.col_addr[i]:
-                m.d.comb += row_set[col_addr].eq(1)
 
         for row in self.rows:
             # Hookup each row's row_selects
-            for row_select, all_selects in zip(row.row_selects, all_row_selects):
+            for row_select, all_selects in zip(row.row_selects, self.row_selects):
                 m.d.comb += row_select.eq(all_selects[row.id])
 
             # Distribute the row_sets for each set port
-            for row_set, src_set in zip(row.row_sets, row_sets):
+            for row_set, src_set in zip(row.row_sets, self.row_data):
                 m.d.comb += row_set.eq(Cat(*src_set))
 
             # Distribute the clear signals
@@ -144,6 +135,7 @@ class PiorityEncoder(Elaboratable):
         self.input = Signal(size)
 
         self.out = Array(Signal(width, name=f"Selected_{i}") for i in range(num_outs))
+        self.outHot = [Signal(size, name=f"Selected_1hot_{i}") for i in range(num_outs)]
 
     def elaborate(self, platform):
         m = Module()
@@ -157,12 +149,12 @@ class PiorityEncoder(Elaboratable):
         prevInput = self.input
         prevNegated = negated
 
-        for out in self.out:
-            outHot = Signal(self.size)
+        for out, outHot in zip(self.out, self.outHot):
             outRegisterd = Signal(self.size)
             nextInput = Signal(self.size)
             nextNegated = Signal(self.size)
 
+            # Note Encoding a 64bit value is really expensive
             encoder = Encoder(self.size)
 
             m.submodules += encoder
@@ -196,6 +188,7 @@ class MatrixScheduler(Elaboratable):
         self.width = width = Impl.numRenamingRegisters.bit_length()
         self.NumIssues = Impl.NumIssues
         self.NumDecodes = Impl.NumDecodes
+        self.NumQueueEntries = Impl.numRenamingRegisters
 
         # Inputs from renamer
 
@@ -209,47 +202,69 @@ class MatrixScheduler(Elaboratable):
         # wakeup matrix
         self.matrix = Matrix(Impl.numRenamingRegisters, Impl.NumDecodes, 2, Impl.NumIssues)
 
+        # Tracks which instructions in the matrix would be elegable for select if all their dependences are met
+        self.waiting_for_select = Signal(Impl.numRenamingRegisters)
+
+
+
         # Outputs
 
-        # TODO: Should the number of readyies be equal to decode width
-        #self.ready = [Signal(width, name=f"ready{i}") for i in range(self.NumWakeupChecks)]
-        #self.readyValid = [Signal(name=f"ready{i}_valid") for i in range(self.NumWakeupChecks)]
-
-        self.ready = Array(Signal(width) for i in range(Impl.NumDecodes))
-        self.readyValid = Array(Signal(width) for i in range(Impl.NumDecodes))
-
+        # TODO: Should the number of readies be equal to decode width?
+        self.ready = Array(Signal(width, name=f"ready{i}") for i in range(Impl.NumDecodes))
+        self.readyValid = Array(Signal(width, name=f"ready{i}_valid") for i in range(Impl.NumDecodes))
 
 
     def elaborate(self, platform):
         m = Module()
 
-        m.submodules += self.matrix
+        m.submodules["bit_matrix"] = self.matrix
+        all_row_selects = []
 
+        # Decode inputs to 1-hot and pass into the matrix
         for i in range(self.NumDecodes):
-            with m.If(self.inValid[i]):
-                m.d.comb += [
-                    self.matrix.row_addr[i].eq(self.inOut[i]),
-                    self.matrix.col_addr[i][0].eq(self.inA[i]),
-                    self.matrix.col_addr[i][1].eq(self.inB[i]),
-                ]
-            with m.Else():
-                m.d.comb += self.matrix.row_addr[i].eq(0)
+            m.submodules[f"select_decoder_{i}"] = selectDecoder = Decoder(self.NumQueueEntries)
+            m.submodules[f"argA_decoder_{i}"] = argADecoder = Decoder(self.NumQueueEntries)
+            m.submodules[f"argB_decoder_{i}"] = argBDecoder = Decoder(self.NumQueueEntries)
 
+            m.d.comb += [
+                selectDecoder.i.eq(self.inOut[i]),
+                argADecoder.i.eq(self.inA[i]),
+                argBDecoder.i.eq(self.inB[i]),
+
+                self.matrix.row_data[i].eq(argADecoder.o | argBDecoder.o),
+            ]
+
+            all_row_selects += [selectDecoder.o]
+
+            with m.If(self.inValid[i]):
+                m.d.comb += self.matrix.row_selects[i].eq(selectDecoder.o)
+            with m.Else():
+                m.d.comb += self.matrix.row_selects[i].eq(0)
+
+        # Dummy code to prevent the currently unused clear logic from being optimized away
         m.d.comb += self.matrix.clear_col_addr[0].eq(self.clear_addr)
         m.d.comb += self.matrix.clear_col_addr[1].eq(self.clear_addr ^ 0b010101)
         m.d.comb += self.matrix.clear_col_addr[2].eq(self.clear_addr + 5)
         m.d.comb += self.matrix.clear_col_addr[3].eq(self.clear_addr + 16)
 
-        encoder = PiorityEncoder(self.matrix.size, self.NumIssues)
-        m.submodules += encoder
 
-        m.d.comb += encoder.input.eq(self.matrix.is_clear),
+        # The selector takes the output of the matrix and chooses NumIssue instructions that are ready
+        m.submodules["selector"] = selecter = PiorityEncoder(self.matrix.size, self.NumIssues)
 
-        for encoder_out, ready, readyValid in zip(encoder.out, self.ready, self.readyValid):
+        m.d.comb += selecter.input.eq(self.matrix.is_clear & self.waiting_for_select),
+
+        for encoder_out, ready, readyValid in zip(selecter.out, self.ready, self.readyValid):
             m.d.comb += [
                 ready.eq(encoder_out),
                 readyValid.eq(encoder_out != 0)
             ]
+
+        InsertedThisCycle = acclumnateOR(m.d.comb, all_row_selects)
+        SelectedThisCycle = acclumnateOR(m.d.comb, selecter.outHot)
+
+        # We want to remove the uops we selected this cycle from the eligible set
+        # And mark any new uops as eligible
+        m.d.sync += self.waiting_for_select.eq((self.waiting_for_select & ~SelectedThisCycle) | InsertedThisCycle)
 
         return m
 
