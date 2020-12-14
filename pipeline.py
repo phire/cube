@@ -46,18 +46,18 @@ class Pipeline(Elaboratable):
         led_buffer = Signal(8)
 
         switch = platform.request("switch", 0)
-        switch_buffer = Signal(6)
+        switch_buffer = Signal(6 * 4)
 
 
         m.d.comb += [
-            self.scheduler.clear_addr.eq(switch_buffer),
+            Cat(*self.scheduler.clear_addr).eq(switch_buffer),
             Cat(led[0], led[1], led[2], led[3], led[4], led[5], led[6], led[7]).eq(led_buffer)
         ]
 
         m.d.sync += [
             switch_buffer.eq(Cat(switch, switch_buffer[1:4])), # just shift an address in
            # led_buffer.eq(Cat(self.scheduler.readyValid[0], self.scheduler.readyValid[1], self.scheduler.readyValid[2], self.scheduler.readyValid[3]))
-           led_buffer.eq(self.scheduler.ready[0] ^ self.scheduler.ready[1] ^ self.scheduler.ready[2] ^ self.scheduler.ready[3])
+           led_buffer.eq(Cat(*self.scheduler.readyValid))
         ]
 
         return m

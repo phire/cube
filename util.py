@@ -7,3 +7,6 @@ def acclumnateOR(comb, items):
         comb += new_result.eq(result | item)
         result = new_result
     return result
+
+def constEncode(value):
+    return (value& (-value)).bit_length()-1
